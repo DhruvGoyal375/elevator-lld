@@ -15,10 +15,14 @@ public class ElevatorController {
     private final ElevatorCar elevator;
     private final PriorityQueue<Floor> upStops;
     private final PriorityQueue<Floor> downStops;
-    private final Set<Floor> upPickupRequests;
-    private final Set<Floor> downPickupRequests;
     private final Set<Floor> internalDestinations;
     private final List<CarStatusListener> listeners;
+    // prevent opposite-direction calls on the same floor from collapsing
+    private final Set<Floor> upPickupRequests;
+    private final Set<Floor> downPickupRequests;
+    // 4-queue partitioning: defer calls behind the car to prevent stalls in min/max heaps
+    private final Set<Floor> deferredUpStops;
+    private final Set<Floor> deferredDownStops;
 
     public ElevatorController(ElevatorCar elevator) {
         this.elevator = Objects.requireNonNull(elevator, "Elevator car cannot be null");
@@ -26,6 +30,8 @@ public class ElevatorController {
         this.downStops = new PriorityQueue<>(Collections.reverseOrder()); // Largest Floor First
         this.upPickupRequests = new HashSet<>();
         this.downPickupRequests = new HashSet<>();
+        this.deferredUpStops = new HashSet<>();
+        this.deferredDownStops = new HashSet<>();
         this.internalDestinations = new HashSet<>();
         this.listeners = new ArrayList<>();
     }
@@ -109,21 +115,39 @@ public class ElevatorController {
 
     private void schedulePickupStop(Floor sourceFloor, Direction reqDir, Floor currentFloor) {
         if (reqDir == Direction.UP) {
-            if (!upStops.contains(sourceFloor)) {
-                upStops.offer(sourceFloor);
-            }
-            if (sourceFloor.compareTo(currentFloor) < 0) {
-                if (!downStops.contains(sourceFloor)) {
-                    downStops.offer(sourceFloor);
+            if (elevator.getCurrentDirection() == Direction.UP && sourceFloor.compareTo(currentFloor) < 0) {
+                // Request is behind car on current UP sweep: defer until subsequent cycle
+                deferredUpStops.add(sourceFloor);
+            } else {
+                if (!upStops.contains(sourceFloor)) {
+                    upStops.offer(sourceFloor);
+                }
+                if (sourceFloor.compareTo(currentFloor) < 0) {
+                    int lowestDown = getLowestStopInQueue(downStops, currentFloor.getId());
+                    if (sourceFloor.getId() < lowestDown || downStops.isEmpty()) {
+                        pruneTurnaroundStopsInDownQueue(sourceFloor.getId());
+                        if (!downStops.contains(sourceFloor)) {
+                            downStops.offer(sourceFloor);
+                        }
+                    }
                 }
             }
         } else if (reqDir == Direction.DOWN) {
-            if (!downStops.contains(sourceFloor)) {
-                downStops.offer(sourceFloor);
-            }
-            if (sourceFloor.compareTo(currentFloor) > 0) {
-                if (!upStops.contains(sourceFloor)) {
-                    upStops.offer(sourceFloor);
+            if (elevator.getCurrentDirection() == Direction.DOWN && sourceFloor.compareTo(currentFloor) > 0) {
+                // Request is behind car on current DOWN sweep: defer until subsequent cycle
+                deferredDownStops.add(sourceFloor);
+            } else {
+                if (!downStops.contains(sourceFloor)) {
+                    downStops.offer(sourceFloor);
+                }
+                if (sourceFloor.compareTo(currentFloor) > 0) {
+                    int highestUp = getHighestStopInQueue(upStops, currentFloor.getId());
+                    if (sourceFloor.getId() > highestUp || upStops.isEmpty()) {
+                        pruneTurnaroundStopsInUpQueue(sourceFloor.getId());
+                        if (!upStops.contains(sourceFloor)) {
+                            upStops.offer(sourceFloor);
+                        }
+                    }
                 }
             }
         }
@@ -137,6 +161,36 @@ public class ElevatorController {
                 elevator.setCurrentDirection(reqDir);
             }
         }
+    }
+
+    private int getHighestStopInQueue(PriorityQueue<Floor> queue, int defaultVal) {
+        int max = defaultVal;
+        for (Floor f : queue) {
+            max = Math.max(max, f.getId());
+        }
+        return max;
+    }
+
+    private int getLowestStopInQueue(PriorityQueue<Floor> queue, int defaultVal) {
+        int min = defaultVal;
+        for (Floor f : queue) {
+            min = Math.min(min, f.getId());
+        }
+        return min;
+    }
+
+    private void pruneTurnaroundStopsInUpQueue(int newPeakFloor) {
+        upStops.removeIf(f -> f.getId() < newPeakFloor
+                && !internalDestinations.contains(f)
+                && !upPickupRequests.contains(f)
+                && !deferredUpStops.contains(f));
+    }
+
+    private void pruneTurnaroundStopsInDownQueue(int newValleyFloor) {
+        downStops.removeIf(f -> f.getId() > newValleyFloor
+                && !internalDestinations.contains(f)
+                && !downPickupRequests.contains(f)
+                && !deferredDownStops.contains(f));
     }
 
     public synchronized void step() {
@@ -172,13 +226,7 @@ public class ElevatorController {
                 handleArrivalAtFloor(nextFloor, Direction.UP);
             }
         } else {
-            if (!downStops.isEmpty() || !downPickupRequests.isEmpty()) {
-                elevator.setCurrentDirection(Direction.DOWN);
-            } else {
-                elevator.setCurrentDirection(Direction.IDLE);
-                elevator.setState(ElevatorState.STOPPED);
-            }
-            notifyListeners();
+            transitionFromUpSweep();
         }
     }
 
@@ -199,14 +247,102 @@ public class ElevatorController {
                 handleArrivalAtFloor(nextFloor, Direction.DOWN);
             }
         } else {
-            if (!upStops.isEmpty() || !upPickupRequests.isEmpty()) {
-                elevator.setCurrentDirection(Direction.UP);
+            transitionFromDownSweep();
+        }
+    }
+
+    private void transitionFromUpSweep() {
+        // 1. Promote any deferred DOWN calls that arrived during previous downward passes
+        if (!deferredDownStops.isEmpty()) {
+            for (Floor f : deferredDownStops) {
+                if (!downStops.contains(f)) {
+                    downStops.offer(f);
+                }
+            }
+            deferredDownStops.clear();
+        }
+
+        // 2. If downward stops or requests exist, reverse direction to DOWN
+        if (!downStops.isEmpty() || !downPickupRequests.isEmpty()) {
+            elevator.setCurrentDirection(Direction.DOWN);
+            notifyListeners();
+            return;
+        }
+
+        // 3. If no downward calls exist, check if there are deferred UP stops that were behind the car
+        if (!deferredUpStops.isEmpty()) {
+            for (Floor f : deferredUpStops) {
+                if (!upStops.contains(f)) {
+                    upStops.offer(f);
+                }
+            }
+            deferredUpStops.clear();
+
+            // To service UP stops located below the current peak position, travel down to the lowest one
+            Floor lowestDeferred = upStops.peek();
+            if (lowestDeferred != null && lowestDeferred.compareTo(elevator.getCurrentFloor()) < 0) {
+                if (!downStops.contains(lowestDeferred)) {
+                    downStops.offer(lowestDeferred);
+                }
+                elevator.setCurrentDirection(Direction.DOWN);
             } else {
-                elevator.setCurrentDirection(Direction.IDLE);
-                elevator.setState(ElevatorState.STOPPED);
+                elevator.setCurrentDirection(Direction.UP);
             }
             notifyListeners();
+            return;
         }
+
+        // 4. No pending stops anywhere
+        elevator.setCurrentDirection(Direction.IDLE);
+        elevator.setState(ElevatorState.STOPPED);
+        notifyListeners();
+    }
+
+    private void transitionFromDownSweep() {
+        // 1. Promote any deferred UP calls that arrived during previous upward passes
+        if (!deferredUpStops.isEmpty()) {
+            for (Floor f : deferredUpStops) {
+                if (!upStops.contains(f)) {
+                    upStops.offer(f);
+                }
+            }
+            deferredUpStops.clear();
+        }
+
+        // 2. If upward stops or requests exist, reverse direction to UP
+        if (!upStops.isEmpty() || !upPickupRequests.isEmpty()) {
+            elevator.setCurrentDirection(Direction.UP);
+            notifyListeners();
+            return;
+        }
+
+        // 3. If no upward calls exist, check if there are deferred DOWN stops that were behind the car
+        if (!deferredDownStops.isEmpty()) {
+            for (Floor f : deferredDownStops) {
+                if (!downStops.contains(f)) {
+                    downStops.offer(f);
+                }
+            }
+            deferredDownStops.clear();
+
+            // To service DOWN stops located above the current valley position, travel up to the highest one
+            Floor highestDeferred = downStops.peek();
+            if (highestDeferred != null && highestDeferred.compareTo(elevator.getCurrentFloor()) > 0) {
+                if (!upStops.contains(highestDeferred)) {
+                    upStops.offer(highestDeferred);
+                }
+                elevator.setCurrentDirection(Direction.UP);
+            } else {
+                elevator.setCurrentDirection(Direction.DOWN);
+            }
+            notifyListeners();
+            return;
+        }
+
+        // 4. No pending stops anywhere
+        elevator.setCurrentDirection(Direction.IDLE);
+        elevator.setState(ElevatorState.STOPPED);
+        notifyListeners();
     }
 
     private void handleArrivalAtFloor(Floor floor, Direction travelDir) {
@@ -252,13 +388,15 @@ public class ElevatorController {
     public synchronized boolean hasPendingRequests() {
         return !downStops.isEmpty()
                 || !upStops.isEmpty()
+                || !deferredUpStops.isEmpty()
+                || !deferredDownStops.isEmpty()
                 || !upPickupRequests.isEmpty()
                 || !downPickupRequests.isEmpty()
                 || !internalDestinations.isEmpty();
     }
 
     public synchronized int getPendingStopsCount() {
-        return upStops.size() + downStops.size();
+        return upStops.size() + downStops.size() + deferredUpStops.size() + deferredDownStops.size();
     }
 
     public synchronized int getHighestPendingFloor() {
@@ -267,6 +405,12 @@ public class ElevatorController {
             max = Math.max(max, f.getId());
         }
         for (Floor f : downStops) {
+            max = Math.max(max, f.getId());
+        }
+        for (Floor f : deferredUpStops) {
+            max = Math.max(max, f.getId());
+        }
+        for (Floor f : deferredDownStops) {
             max = Math.max(max, f.getId());
         }
         for (Floor f : upPickupRequests) {
@@ -284,6 +428,12 @@ public class ElevatorController {
             min = Math.min(min, f.getId());
         }
         for (Floor f : downStops) {
+            min = Math.min(min, f.getId());
+        }
+        for (Floor f : deferredUpStops) {
+            min = Math.min(min, f.getId());
+        }
+        for (Floor f : deferredDownStops) {
             min = Math.min(min, f.getId());
         }
         for (Floor f : upPickupRequests) {
@@ -312,6 +462,14 @@ public class ElevatorController {
 
     public synchronized Set<Floor> getDownPickupRequests() {
         return Collections.unmodifiableSet(downPickupRequests);
+    }
+
+    public synchronized Set<Floor> getDeferredUpStops() {
+        return Collections.unmodifiableSet(deferredUpStops);
+    }
+
+    public synchronized Set<Floor> getDeferredDownStops() {
+        return Collections.unmodifiableSet(deferredDownStops);
     }
 
     public synchronized Set<Floor> getInternalDestinations() {

@@ -7,7 +7,6 @@ import com.lld.elevator.model.ExternalRequest;
 import com.lld.elevator.model.Floor;
 import com.lld.elevator.observer.CarStatusListener;
 import com.lld.elevator.strategy.ElevatorSelectionStrategy;
-
 import java.util.List;
 import java.util.Objects;
 

@@ -55,11 +55,15 @@ java -cp target/classes com.lld.elevator.ElevatorSystemDemo
 * [`ElevatorSystem`](src/main/java/com/lld/elevator/service/ElevatorSystem.java) registers as a listener on each [`ElevatorController`](src/main/java/com/lld/elevator/model/ElevatorController.java).
 * Whenever a car moves, arrives at a floor, opens/closes doors, or changes direction, status updates are broadcast to registered listeners.
 
-### E. SCAN / LOOK Elevator Scheduling
-* Each [`ElevatorController`](src/main/java/com/lld/elevator/model/ElevatorController.java) manages movement using directional priority queues:
-  - `upStops`: Min-heap (smallest floor first) for upward travel.
-  - `downStops`: Max-heap (largest floor first) for downward travel.
-* The car continues in its current direction until all stops in that direction are fulfilled, then reverses direction.
+### E. SCAN / LOOK Elevator Scheduling with 4-Queue Partitioning
+* Each [`ElevatorController`](src/main/java/com/lld/elevator/model/ElevatorController.java) manages movement using directional priority queues and deferred secondary queues:
+  - `upStops`: Min-heap (smallest floor first) for the current upward sweep ($\ge \text{currentFloor}$).
+  - `deferredUpStops`: UP requests received behind the car ($< \text{currentFloor}$) held for the subsequent upward sweep.
+  - `downStops`: Max-heap (largest floor first) for the current downward sweep ($\le \text{currentFloor}$).
+  - `deferredDownStops`: DOWN requests received behind the car ($> \text{currentFloor}$) held for the subsequent downward sweep.
+* **Semantic Intent Tracking**:
+  - `internalDestinations`: Set of cabin drop-off floors pressed inside the elevator.
+  - `upPickupRequests` & `downPickupRequests`: Distinct sets for hallway boarding intents, preventing opposite-direction calls on the same floor from collapsing into a single premature stop.
 
 ---
 
