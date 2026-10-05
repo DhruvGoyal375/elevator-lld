@@ -94,7 +94,9 @@ public class ElevatorSystem implements CarStatusListener {
 
     public synchronized void stepSimulation() {
         for (ElevatorController controller : controllers) {
-            if (controller.hasPendingRequests() || controller.getElevator().getState() == ElevatorState.MOVING) {
+            if (controller.getElevator().getState() != ElevatorState.OUT_OF_SERVICE
+                    && (controller.hasPendingRequests()
+                            || controller.getElevator().getState() == ElevatorState.MOVING)) {
                 controller.step();
             }
         }
@@ -102,6 +104,33 @@ public class ElevatorSystem implements CarStatusListener {
 
     public boolean hasActiveRequests() {
         return controllers.stream()
-                .anyMatch(c -> c.hasPendingRequests() || c.getElevator().getState() == ElevatorState.MOVING);
+                .anyMatch(c -> c.getElevator().getState() != ElevatorState.OUT_OF_SERVICE
+                        && (c.hasPendingRequests() || c.getElevator().getState() == ElevatorState.MOVING));
+    }
+
+    public synchronized void takeCarOutOfService(int carId) {
+        for (ElevatorController controller : controllers) {
+            if (controller.getElevator().getId() == carId) {
+                controller.takeOutOfService();
+                List<ExternalRequest> orphaned = controller.clearAndGetPendingExternalRequests();
+                System.out.printf(
+                        "[ElevatorSystem] Car %d taken OUT_OF_SERVICE. Redistributing %d pending external requests...%n",
+                        carId, orphaned.size());
+                for (ExternalRequest req : orphaned) {
+                    handleExternalRequest(req);
+                }
+                break;
+            }
+        }
+    }
+
+    public synchronized void returnCarToService(int carId) {
+        for (ElevatorController controller : controllers) {
+            if (controller.getElevator().getId() == carId) {
+                controller.returnToService();
+                System.out.printf("[ElevatorSystem] Car %d returned to service.%n", carId);
+                break;
+            }
+        }
     }
 }

@@ -10,7 +10,6 @@ import com.lld.elevator.panel.HallwayPanel;
 import com.lld.elevator.service.ElevatorSystem;
 import com.lld.elevator.strategy.ElevatorSelectionStrategy;
 import com.lld.elevator.strategy.EstimatedTimeOfArrivalStrategy;
-
 import java.util.List;
 
 public class ElevatorSystemDemo {
