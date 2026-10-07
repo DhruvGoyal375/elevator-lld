@@ -3,14 +3,7 @@ package com.lld.elevator.model;
 import com.lld.elevator.enums.Direction;
 import com.lld.elevator.enums.ElevatorState;
 import com.lld.elevator.observer.CarStatusListener;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Objects;
-import java.util.PriorityQueue;
-import java.util.Set;
-import java.util.TreeSet;
+import java.util.*;
 
 /**
  * Controller managing motion, scheduling, and request fulfillment for a single ElevatorCar.
@@ -67,6 +60,7 @@ public class ElevatorController {
         if (destinationFloor.equals(currentFloor) && elevator.getState() == ElevatorState.STOPPED) {
             elevator.openDoors();
             elevator.closeDoors();
+            notifyListeners();
             return;
         }
 
@@ -100,22 +94,16 @@ public class ElevatorController {
         }
 
         Floor currentFloor = elevator.getCurrentFloor();
-        if (sourceFloor.equals(currentFloor) && elevator.getState() == ElevatorState.STOPPED) {
-            if (elevator.getCurrentDirection() == Direction.IDLE || elevator.getCurrentDirection() == direction) {
-                elevator.setCurrentDirection(direction);
-                handleArrivalAtFloor(sourceFloor, direction);
-                return;
-            }
+        if (sourceFloor.equals(currentFloor)
+                && elevator.getState() == ElevatorState.STOPPED
+                && (elevator.getCurrentDirection() == Direction.IDLE || elevator.getCurrentDirection() == direction)) {
+            elevator.setCurrentDirection(direction);
+            handleArrivalAtFloor(sourceFloor, direction);
+            return;
         }
 
         if (elevator.getCurrentDirection() == Direction.IDLE) {
-            if (sourceFloor.compareTo(currentFloor) > 0) {
-                elevator.setCurrentDirection(Direction.UP);
-            } else if (sourceFloor.compareTo(currentFloor) < 0) {
-                elevator.setCurrentDirection(Direction.DOWN);
-            } else {
-                elevator.setCurrentDirection(direction);
-            }
+            elevator.setCurrentDirection(sourceFloor.compareTo(currentFloor) > 0 ? Direction.UP : Direction.DOWN);
         }
         notifyListeners();
     }
@@ -253,26 +241,22 @@ public class ElevatorController {
         Floor current = elevator.getCurrentFloor();
         if (hasRequestsBelow(current)) {
             elevator.setCurrentDirection(Direction.DOWN);
-            notifyListeners();
-            processDownStep();
         } else {
             elevator.setCurrentDirection(Direction.IDLE);
             elevator.setState(ElevatorState.STOPPED);
-            notifyListeners();
         }
+        notifyListeners();
     }
 
     private void transitionFromDownSweep() {
         Floor current = elevator.getCurrentFloor();
         if (hasRequestsAbove(current)) {
             elevator.setCurrentDirection(Direction.UP);
-            notifyListeners();
-            processUpStep();
         } else {
             elevator.setCurrentDirection(Direction.IDLE);
             elevator.setState(ElevatorState.STOPPED);
-            notifyListeners();
         }
+        notifyListeners();
     }
 
     private void pickInitialDirectionIfIdle() {
@@ -289,16 +273,6 @@ public class ElevatorController {
             }
         } else if (hasRequestsBelow(currentFloor)) {
             elevator.setCurrentDirection(Direction.DOWN);
-        } else {
-            if (cabStops.contains(currentFloor)) {
-                handleArrivalAtFloor(currentFloor, Direction.IDLE);
-            } else if (upPickupRequests.contains(currentFloor)) {
-                elevator.setCurrentDirection(Direction.UP);
-                handleArrivalAtFloor(currentFloor, Direction.UP);
-            } else if (downPickupRequests.contains(currentFloor)) {
-                elevator.setCurrentDirection(Direction.DOWN);
-                handleArrivalAtFloor(currentFloor, Direction.DOWN);
-            }
         }
     }
 
@@ -330,18 +304,6 @@ public class ElevatorController {
         if (lUp != null && (best == null || lUp.compareTo(best) > 0)) best = lUp;
         if (lDown != null && (best == null || lDown.compareTo(best) > 0)) best = lDown;
         return best;
-    }
-
-    public synchronized void takeOutOfService() {
-        elevator.setState(ElevatorState.OUT_OF_SERVICE);
-        elevator.setCurrentDirection(Direction.IDLE);
-        notifyListeners();
-    }
-
-    public synchronized void returnToService() {
-        elevator.setState(ElevatorState.STOPPED);
-        elevator.setCurrentDirection(Direction.IDLE);
-        notifyListeners();
     }
 
     public synchronized List<ExternalRequest> clearAndGetPendingExternalRequests() {
@@ -390,6 +352,9 @@ public class ElevatorController {
     }
 
     public synchronized int countStopsStrictlyBetween(int low, int high, Direction dir) {
+        if (low >= high) {
+            return 0;
+        }
         Floor fLow = Floor.of(low);
         Floor fHigh = Floor.of(high);
         Set<Floor> stops = new HashSet<>(cabStops.subSet(fLow, false, fHigh, false));
@@ -401,73 +366,16 @@ public class ElevatorController {
         return stops.size();
     }
 
-    public synchronized PriorityQueue<Floor> getUpStops() {
-        PriorityQueue<Floor> queue = new PriorityQueue<>();
-        Floor current = elevator.getCurrentFloor();
-        for (Floor f : cabStops.tailSet(current, true)) {
-            queue.offer(f);
-        }
-        for (Floor f : upPickupRequests.tailSet(current, true)) {
-            if (!queue.contains(f)) {
-                queue.offer(f);
-            }
-        }
-        Floor peakDown = getHighestDownRequest();
-        if (peakDown != null && peakDown.compareTo(current) >= 0 && !hasRequestsAbove(peakDown)) {
-            if (!queue.contains(peakDown)) {
-                queue.offer(peakDown);
-            }
-        }
-        return queue;
+    public synchronized void takeOutOfService() {
+        elevator.setState(ElevatorState.OUT_OF_SERVICE);
+        elevator.setCurrentDirection(Direction.IDLE);
+        notifyListeners();
     }
 
-    public synchronized PriorityQueue<Floor> getDownStops() {
-        PriorityQueue<Floor> queue = new PriorityQueue<>(Collections.reverseOrder());
-        Floor current = elevator.getCurrentFloor();
-        for (Floor f : cabStops) {
-            if (elevator.getCurrentDirection() == Direction.DOWN || f.compareTo(current) <= 0) {
-                queue.offer(f);
-            }
-        }
-        for (Floor f : downPickupRequests) {
-            if (elevator.getCurrentDirection() == Direction.DOWN && f.compareTo(current) > 0) {
-                continue; // deferred
-            }
-            if (!queue.contains(f)) {
-                queue.offer(f);
-            }
-        }
-        Floor valleyUp = getLowestUpRequest();
-        if (valleyUp != null && valleyUp.compareTo(current) <= 0 && !hasRequestsBelow(valleyUp)) {
-            if (!queue.contains(valleyUp)) {
-                queue.offer(valleyUp);
-            }
-        }
-        return queue;
-    }
-
-    public synchronized Set<Floor> getDeferredUpStops() {
-        Floor current = elevator.getCurrentFloor();
-        if (elevator.getCurrentDirection() == Direction.UP) {
-            return Collections.unmodifiableSet(new HashSet<>(upPickupRequests.headSet(current, false)));
-        }
-        return Collections.emptySet();
-    }
-
-    public synchronized Set<Floor> getDeferredDownStops() {
-        Floor current = elevator.getCurrentFloor();
-        if (elevator.getCurrentDirection() == Direction.DOWN) {
-            return Collections.unmodifiableSet(new HashSet<>(downPickupRequests.tailSet(current, false)));
-        }
-        return Collections.emptySet();
-    }
-
-    private Floor getHighestDownRequest() {
-        return downPickupRequests.isEmpty() ? null : downPickupRequests.last();
-    }
-
-    private Floor getLowestUpRequest() {
-        return upPickupRequests.isEmpty() ? null : upPickupRequests.first();
+    public synchronized void returnToService() {
+        elevator.setState(ElevatorState.STOPPED);
+        elevator.setCurrentDirection(Direction.IDLE);
+        notifyListeners();
     }
 
     public synchronized Set<Floor> getUpPickupRequests() {

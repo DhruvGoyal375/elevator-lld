@@ -216,8 +216,10 @@ public class ElevatorSystemDemo {
         System.out.println("Step 2: Hallway passenger at Floor 2 requests UP (behind car moving UP!).");
         hallwayFloor2.pressUp();
         System.out.printf(
-                ">> Queue telemetry: active upStops: %s, deferredUpStops: %s%n",
-                controller.getUpStops(), controller.getDeferredUpStops());
+                ">> Request telemetry: internal: %s, up pickups: %s, down pickups: %s%n",
+                controller.getInternalDestinations(),
+                controller.getUpPickupRequests(),
+                controller.getDownPickupRequests());
 
         System.out.println("\n[Simulation] Stepping simulation through full cycle...");
         int cycle = 1;
